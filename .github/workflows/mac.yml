@@ -1,0 +1,92 @@
+name: Mac app
+# Builds HALO for Mac (Apple Silicon and Intel) on GitHub's Mac machines, which are free for
+# public repos. The source stays private: it is read from Saad5643/opendots with the read-only
+# OPENDOTS_TOKEN secret. Then it checks the app really runs: the bundled server answers and the
+# app opens (a screenshot is kept).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit of opendots to build
+        default: mac
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Needs the OPENDOTS_TOKEN secret
+        env:
+          TOKEN: ${{ secrets.OPENDOTS_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Add a read-only token for Saad5643/opendots as the OPENDOTS_TOKEN secret of this repo."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: Saad5643/opendots
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.OPENDOTS_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Build the app
+        run: npm run package:mac
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: What was built
+        run: ls -la release
+      - name: Signature
+        run: |
+          app="release/mac-arm64/HALO.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | head -5
+      - name: The bundled server starts on a Mac
+        run: |
+          app="$PWD/release/mac-arm64/HALO.app"
+          res="$app/Contents/Resources/app"
+          data="$RUNNER_TEMP/halo-server"
+          mkdir -p "$data/data"
+          cd "$data"
+          ELECTRON_RUN_AS_NODE=1 NODE_ENV=production HOST=127.0.0.1 PORT=4399 APP_ORIGIN=http://127.0.0.1:4399 \
+            MOONS_STATIC_DIR="$res/dist/client" MOONS_APP_ROOT="$res" MOONS_USER_DATA="$data" \
+            DATABASE_PATH="$data/data/moons.sqlite" COPILOTKIT_TELEMETRY_DISABLED=true DO_NOT_TRACK=1 \
+            "$app/Contents/MacOS/HALO" "$res/dist/bundle/server.mjs" > "$data/server.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:4399/api/workspace > "$data/workspace.json"; then echo "server up after ${i}s"; break; fi
+            sleep 1
+          done
+          tail -40 "$data/server.log"
+          test -s "$data/workspace.json"
+          curl -sf -o /dev/null -w "page %{http_code}\n" http://127.0.0.1:4399/
+          cp "$data/server.log" "$RUNNER_TEMP/server.log"
+      - name: The app opens
+        run: |
+          app="$PWD/release/mac-arm64/HALO.app"
+          HALO_PROFILE=ci "$app/Contents/MacOS/HALO" > "$RUNNER_TEMP/app.log" 2>&1 &
+          sleep 30
+          screencapture -x "$RUNNER_TEMP/halo-mac.png" || true
+          pgrep -fl "HALO.app/Contents/MacOS/HALO" || (tail -40 "$RUNNER_TEMP/app.log"; exit 1)
+          tail -40 "$RUNNER_TEMP/app.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: halo-mac
+          retention-days: 14
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/latest-mac.yml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: halo-mac-checks
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/halo-mac.png
+            ${{ runner.temp }}/server.log
+            ${{ runner.temp }}/app.log
