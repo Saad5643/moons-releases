@@ -36,7 +36,8 @@ jobs:
           git checkout "${{ inputs.uxplay_ref }}"
           git log -1 --format='%H %cd %s' | tee ../uxplay-commit.txt
           mkdir build && cd build
-          cmake -G Ninja ..
+          # No -march=native: the build machine has newer CPU features (AVX-512) than many PCs.
+          cmake -G Ninja -DNO_MARCH_NATIVE=ON ..
           ninja
           ls -la uxplay.exe
       - name: Pack a portable folder
