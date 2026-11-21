@@ -1,0 +1,86 @@
+name: AirPlay add-on
+# Builds UxPlay (GPL-3.0, https://github.com/FDH2/UxPlay) for Windows from its official source,
+# with its built-in mDNS (no Apple Bonjour service needed), and packs it with the GStreamer
+# pieces it uses into one portable folder. HALO downloads this zip when AirPlay is first turned on.
+on:
+  workflow_dispatch:
+    inputs:
+      uxplay_ref:
+        description: UxPlay branch, tag or commit
+        default: master
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git zip
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-libplist mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base
+            mingw-w64-ucrt-x86_64-gst-plugins-good mingw-w64-ucrt-x86_64-gst-plugins-bad
+            mingw-w64-ucrt-x86_64-gst-libav
+      - name: Build UxPlay
+        run: |
+          git clone https://github.com/FDH2/UxPlay uxplay-src
+          cd uxplay-src
+          git checkout "${{ inputs.uxplay_ref }}"
+          git log -1 --format='%H %cd %s' | tee ../uxplay-commit.txt
+          mkdir build && cd build
+          cmake -G Ninja ..
+          ninja
+          ls -la uxplay.exe
+      - name: Pack a portable folder
+        run: |
+          set -e
+          out="$PWD/airplay"
+          mkdir -p "$out/lib/gstreamer-1.0" "$out/libexec/gstreamer-1.0"
+          cp uxplay-src/build/uxplay.exe "$out/"
+          cp /ucrt64/libexec/gstreamer-1.0/gst-plugin-scanner.exe "$out/libexec/gstreamer-1.0/"
+          # Only the GStreamer plugins UxPlay's pipelines use (video, audio, decoders, sinks).
+          keep="coreelements app playback typefindfunctions videoconvertscale videorate videoparsersbad
+                libav d3d11 d3d12 autodetect audioconvert audioresample audioparsers volume wasapi wasapi2
+                directsound isomp4 rtp rtpmanager udp jpeg png opengl videofilter audiorate deinterlace"
+          for p in $keep; do
+            f="/ucrt64/lib/gstreamer-1.0/libgst$p.dll"
+            if [ -f "$f" ]; then cp "$f" "$out/lib/gstreamer-1.0/"; else echo "no plugin $p"; fi
+          done
+          # Every DLL those programs and plugins load from the MSYS2 tree.
+          for f in "$out"/uxplay.exe "$out"/libexec/gstreamer-1.0/*.exe "$out"/lib/gstreamer-1.0/*.dll; do
+            ldd "$f" | awk '/\/ucrt64\// {print $3}'
+          done | sort -u | while read -r dll; do cp -n "$dll" "$out/"; done
+          cp uxplay-commit.txt "$out/"
+          cp uxplay-src/LICENSE "$out/UXPLAY-LICENSE.txt" 2>/dev/null || cp /ucrt64/share/licenses/gstreamer/* "$out/" 2>/dev/null || true
+          printf 'UxPlay (GPL-3.0) built from https://github.com/FDH2/UxPlay at the commit in uxplay-commit.txt.\nGStreamer and its libraries come from MSYS2 (https://packages.msys2.org), each under its own license.\n' > "$out/SOURCES.txt"
+          du -sh "$out"; ls "$out" | wc -l
+      - name: It starts and loads its plugins
+        shell: pwsh
+        run: |
+          $dir = "$PWD\airplay"
+          $env:PATH = "$dir;C:\Windows\System32"
+          $env:GST_PLUGIN_PATH = "$dir\lib\gstreamer-1.0"
+          $env:GST_PLUGIN_SYSTEM_PATH = "$dir\lib\gstreamer-1.0"
+          $env:GST_PLUGIN_SCANNER = "$dir\libexec\gstreamer-1.0\gst-plugin-scanner.exe"
+          $env:GST_REGISTRY = "$env:RUNNER_TEMP\gst-registry.bin"
+          & "$dir\uxplay.exe" -v 2>&1 | Select-Object -First 5
+          $p = Start-Process "$dir\uxplay.exe" -ArgumentList '-n','HALO-CI','-nh' -RedirectStandardOutput "$env:RUNNER_TEMP\ux.out" -RedirectStandardError "$env:RUNNER_TEMP\ux.err" -PassThru
+          Start-Sleep 12
+          Get-Content "$env:RUNNER_TEMP\ux.out","$env:RUNNER_TEMP\ux.err" | Select-Object -Last 60
+          if ($p.HasExited) { throw "uxplay exited with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+      - name: Zip
+        run: cd airplay && zip -qr9 ../halo-airplay-win64.zip . && cd .. && ls -la halo-airplay-win64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: halo-airplay-win64
+          retention-days: 30
+          path: halo-airplay-win64.zip
