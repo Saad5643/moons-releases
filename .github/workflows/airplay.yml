@@ -49,7 +49,8 @@ jobs:
           # Only the GStreamer plugins UxPlay's pipelines use (video, audio, decoders, sinks).
           keep="coreelements app playback typefindfunctions videoconvertscale videorate videoparsersbad
                 libav d3d11 d3d12 autodetect audioconvert audioresample audioparsers volume wasapi wasapi2
-                directsound isomp4 rtp rtpmanager udp jpeg png opengl videofilter audiorate deinterlace"
+                directsound isomp4 rtp rtpmanager udp jpeg png opengl videofilter audiorate deinterlace
+                level imagefreeze pango"
           for p in $keep; do
             f="/ucrt64/lib/gstreamer-1.0/libgst$p.dll"
             if [ -f "$f" ]; then cp "$f" "$out/lib/gstreamer-1.0/"; else echo "no plugin $p"; fi
